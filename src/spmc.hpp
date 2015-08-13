@@ -40,7 +40,7 @@ public:
     template<class U>
     bool try_push (U&& data);
     bool try_pop (T& out);
-    bool try_pop_cas (T& out);
+    bool try_pop_commit (T& out);
     bool try_pop_dec (T& out);
 
     spmc_queue()
@@ -79,9 +79,21 @@ bool spmc_queue<T, qsize>::try_push(U&& datum) {
 }
 
 //trickier since multi consumers
+//need to test in the actual queue
+//low but existing contention, also
+//unsure how lock prefix actually affects 
+//other reads/writes
+//cas has less locks than other two
+//and under low contention, won't loop a whole lot
+//worth keeping all for now as investigating
+//but will set cas for now as it seems to generally have better
+//low contention performance
+//also since contention is low may not be an issue
+//but being wait free is nice
+
 
 template<class T, size_t qsize>
-bool spmc_queue<T, qsize>::try_pop(T& out) {
+bool spmc_queue<T, qsize>::try_pop_commit(T& out) {
     uint64_t modsize = qsize - 1;
     //quick loads to avoid unneeded fences in empty case
     auto ctail = tail.load(std::memory_order_relaxed);
@@ -153,18 +165,9 @@ bool spmc_queue<T, qsize>::try_pop_dec(T& out) {
 }
 
 
-//comparing cas to that 'effecient' hot mess of atomic reads and
-//memory barriers and overcommits. That's likely better in the face of serious
-//contention, but this is being written assuming lower contention. we
-//shall see
-
-//with less contention, this seems to be faster - 1 enqueue, 2 dequeue
-//far faster with 1 enqueue, 1 dequeue
-//but with 1 enqueue, 3 dequeue, slower because cas contention
-
-//since this is for less contention, will be using the cas version
+//with little contention, each one is close
 template<class T, size_t qsize>
-bool spmc_queue<T, qsize>::try_pop_cas(T& out) {
+bool spmc_queue<T, qsize>::try_pop(T& out) {
     uint64_t modsize = qsize - 1;
     //should work most of time, cas will save us anyways
     //if some spooky changes happen to head
