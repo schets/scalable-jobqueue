@@ -1,20 +1,27 @@
-#ifndef SPMC_HPP_
-#define SPMC_HPP_
+#ifndef MPMC_HPP_
+#define MPMC_HPP_
 #include <queue_util.hpp>
 #include <memory>
 #include <utility>
 #include <cstdint>
 
-//investigate unbounded version, from same implementation?
-//single producer multi consumer queue
+//multi producer multi consumer queue
 //this is built under the assumption that there will
-//rarely be other consumers
+//rarely be other consumers, but often other producers
+//so no cas version here. rare spurious failure is ok here
+//especially since it happens only when queue is very near full
+//anyways
+
+//could do some spmc multiplex thing
+//but since contention isn't gonna be that high
+//and wait free, I think this should be fine
+//could check it out though
 
 //queuesize is static since the code requires queuesize to be a power
 //of two to function - data corruption otherwise, best not left as a
 //runtime check
 template<class T, size_t qsize>
-class alignas(64) spmc_queue {
+class alignas(64) mpmc_queue {
 public:
 
     static constexpr size_t modsize = qsize - 1;
@@ -28,8 +35,10 @@ public:
     
     //producer side
     std::atomic<uint64_t> tail;
-    uint64_t head_cache;
-    char _c1[q_u::cache_size - (sizeof(tail) + sizeof(head_cache))];
+    std::atomic<uint64_t> enqueue_opt;
+    std::atomic<uint64_t> enqueue_over;
+    char _c1[q_u::cache_size -
+             (sizeof(tail) + sizeof(enqueue_opt) + sizeof(enqueue_over))];
 
     //based on
     //https://github.com/cameron314/concurrentqueue/blob/master/concurrentqueue.h
@@ -43,7 +52,7 @@ public:
     bool try_pop_commit (T& out);
     bool try_pop_dec (T& out);
 
-    spmc_queue()
+    mpmc_queue()
         :
         elements(new T[qsize]),
         tail(0),
@@ -57,24 +66,34 @@ public:
     }
 };
 
+//yay wait free mpmc queue
+//now for testing...
+//maybe benchmark other version as well
 template<class T, size_t qsize>
 template<class U>
-bool spmc_queue<T, qsize>::try_push(U&& datum) {
+bool mpmc_queue<T, qsize>::try_push(U&& datum) {
     uint64_t modsize = qsize - 1;
 
-    uint64_t ctail = tail.load(std::memory_order_relaxed);
-    //according to the last seen value of head, no space left :(
-    if ((ctail - head_cache) >= (qsize-1)) {
-        head_cache = head.load(std::memory_order_acquire);
-        if ((ctail - head_cache) >= (qsize-1)) {
+    auto enqueue = enqueue_opt.load(std::memory_order_relaxed);
+    auto head = head.load(std::memory_order_relaxed);
+
+    //don't double check here, move on somewhere else
+    if ((enqueue - head) >= (qsize - 1))
+        return false;
+
+    enqueue = enqueue_opt.fetch_add(1, std::memory_order_acq_rel);
+    
+    if ((enqueue - head) >= (qsize - 1)) {
+        head = head.load(std::memory_order_aquire);
+        if ((enqueue - head) >= (qsize - 1)) {
+            enqueue_opt.fetch_sub(1, std::memory_order_acq_rel);
             return false;
         }
     }
 
+    auto ctail = tail.fetch_add(1, std::memory_order_acq_rel);
     size_t ind = ctail & modsize;
     elements[ind] = std::forward<U>(datum);
-
-    tail.store(ctail + 1, std::memory_order_release);
     return true;
 }
 
@@ -95,14 +114,19 @@ bool spmc_queue<T, qsize>::try_push(U&& datum) {
 
 
 template<class T, size_t qsize>
-bool spmc_queue<T, qsize>::try_pop_commit(T& out) {
+bool mpmc_queue<T, qsize>::try_pop_commit(T& out) {
     uint64_t modsize = qsize - 1;
     //quick loads to avoid unneeded fences in empty case
+    //try without?
     auto ctail = tail.load(std::memory_order_relaxed);
     auto dequeue = dequeue_opt.load(std::memory_order_relaxed);
     auto overcommit = dequeue_over.load(std::memory_order_relaxed);
-    if ((dequeue - overcommit) >= ctail)
-        return false;
+    if ((dequeue - overcommit) >= ctail) {
+        ctail = tail.load(std::memory_order_acquire);
+        if ((dequeue - overcommit) >= ctail)
+            return false;
+    }
+    
     //perform fence so that now, when we reload the optimistic count,
     //that load will be as recent (or more) than the overcommit load
     
@@ -110,6 +134,8 @@ bool spmc_queue<T, qsize>::try_pop_commit(T& out) {
 
     //load is acquire since memory fence takes care of that
     dequeue = dequeue_opt.fetch_add(1, std::memory_order_relaxed);
+
+    
 
     //reload tail if need be
     if ((dequeue - overcommit) >= ctail) {
@@ -131,7 +157,7 @@ bool spmc_queue<T, qsize>::try_pop_commit(T& out) {
 
 //try the non overcommit queue - all these for eventual benchmarking
 template<class T, size_t qsize>
-bool spmc_queue<T, qsize>::try_pop_dec(T& out) {
+bool mpmc_queue<T, qsize>::try_pop_dec(T& out) {
     uint64_t modsize = qsize - 1;
     //quick loads to avoid unneeded fences in empty case
     auto ctail = tail.load(std::memory_order_relaxed);
@@ -167,7 +193,7 @@ bool spmc_queue<T, qsize>::try_pop_dec(T& out) {
 
 //with little contention, each one is close
 template<class T, size_t qsize>
-bool spmc_queue<T, qsize>::try_pop(T& out) {
+bool mpmc_queue<T, qsize>::try_pop(T& out) {
     uint64_t modsize = qsize - 1;
     //should work most of time, cas will save us anyways
     //if some spooky changes happen to head
@@ -175,7 +201,7 @@ bool spmc_queue<T, qsize>::try_pop(T& out) {
     auto chead = head.load(std::memory_order_relaxed);
 
     if (chead >= ctail) {
-            return false;
+        return false;
     }
 
     //will almost always work

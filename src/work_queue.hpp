@@ -5,26 +5,27 @@
 #include <thread>
 #include <functional>
 
-//Uses a single spmc queue per thread
+//Uses a single queue per thread
 //but upon failure to get work
 //a thread goes and looks for other threads
-//while possible to have a single spmc queue
-//especially since the queue is wait free
-//costs will be paid in the form of cache contention
-//on pretty much every lookup
-//now
+//while possible to have a single wait free queue
+//will pay the costs of contention. Or at least we will see...
+///now
 //in the real world
 //that's a-ok since work done by threads is going to be longer than
 //the cost of a memory read. But it's more interesting to make these
 //things highly optimized
 
-template<size_t qsize = 4096>
-class sp_work_queue {
+//avoiding virtual calls for now, is it worth it?
+//would make simpler, indirect call prediction would help
+//will benchmark this version first, and unless this is < 15-20
+//ns/push-pop, will try virtualizing it
 
-    typedef std::function<void()> job;
-    
+template<class Callable, template<typename> class Queue>
+class work_queue {
+
     struct work_queue {
-        spmc_queue<job, qsize> queue;
+        Queue<Callable> queue;
         uint64_t id;
         uint64_t _counter; //used to make work stealing more 'random'
     };
@@ -33,14 +34,12 @@ class sp_work_queue {
     
     size_t n_queues;
     size_t current_queue;
-    std::unique_ptr<spmc_queue<T, qsize>> queues;
-    
-    bool add_job(job&& jb);
-    bool add_job(const job& jb);
+    std::unique_ptr<Queue<Callable>> queues;
+    bool add_job(const Callable& jb);
 };
 
-template<size_t qsize>
-bool sp_work_queue::add_job(const job& jb) {
+template<class Callable, template<typename> class Queue>
+bool work_queue<Callable, Queue>::add_job(const job& jb) {
     for (size_t tries = 0; tries < n_queues * 2; tries++) {
         auto& curq = queues[current_queue];
         current_queue = (current_queue + 1) % n_queues;
