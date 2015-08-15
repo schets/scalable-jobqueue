@@ -1,6 +1,6 @@
 #ifndef SPMC_HPP_
 #define SPMC_HPP_
-#include <queue_util.hpp>
+#include "queue_util.hpp"
 #include <memory>
 #include <utility>
 #include <cstdint>
@@ -9,12 +9,17 @@
 //single producer multi consumer queue
 //this is built under the assumption that there will
 //rarely be other consumers
+//both push and pop are wait free
+//work-stealing queues are often
+//double ended to reduce stealing contention
+//but that's out of my league, so I'm making them
+//wait free to help avoid that issue
 
 //queuesize is static since the code requires queuesize to be a power
 //of two to function - data corruption otherwise, best not left as a
 //runtime check
 template<class T, size_t qsize>
-class alignas(64) spmc_queue {
+class spmc_queue {
 public:
 
     static constexpr size_t modsize = qsize - 1;
@@ -22,26 +27,26 @@ public:
     static_assert(((qsize != 0) && !(qsize & (qsize - 1))),
                   "qsize must be a power of two");
 
-
-    std::unique_ptr<T[]> elements;
-    char _c0[q_u::cache_size - sizeof(elements)];
+    alignas(64) std::unique_ptr<T[]> elements;
+    char _c0[q_u::cache_size - sizeof(std::unique_ptr<T[]>)];
     
     //producer side
-    std::atomic<uint64_t> tail;
-    uint64_t head_cache;
-    char _c1[q_u::cache_size - (sizeof(tail) + sizeof(head_cache))];
+    std::atomic<size_t> tail;
+    size_t head_cache;
+    char _c1[q_u::cache_size - (sizeof(std::atomic<size_t>)
+		                        + sizeof(size_t))];
 
     //based on
     //https://github.com/cameron314/concurrentqueue/blob/master/concurrentqueue.h
     //really need to benchmark against the simple cas loop
     //this seems like a lot of extra work
-    std::atomic<uint64_t> head, dequeue_opt, dequeue_over;
+    std::atomic<size_t> head, dequeue_opt, dequeue_over;
 
     template<class U>
     bool try_push (U&& data);
     bool try_pop (T& out);
     bool try_pop_commit (T& out);
-    bool try_pop_dec (T& out);
+    bool try_pop_cas (T& out);
 
     spmc_queue()
         :
@@ -60,9 +65,8 @@ public:
 template<class T, size_t qsize>
 template<class U>
 bool spmc_queue<T, qsize>::try_push(U&& datum) {
-    uint64_t modsize = qsize - 1;
 
-    uint64_t ctail = tail.load(std::memory_order_relaxed);
+    auto ctail = tail.load(std::memory_order_relaxed);
     //according to the last seen value of head, no space left :(
     if ((ctail - head_cache) >= (qsize-1)) {
         head_cache = head.load(std::memory_order_acquire);
@@ -71,7 +75,7 @@ bool spmc_queue<T, qsize>::try_push(U&& datum) {
         }
     }
 
-    size_t ind = ctail & modsize;
+    auto ind = ctail & modsize;
     elements[ind] = std::forward<U>(datum);
 
     tail.store(ctail + 1, std::memory_order_release);
@@ -96,7 +100,7 @@ bool spmc_queue<T, qsize>::try_push(U&& datum) {
 
 template<class T, size_t qsize>
 bool spmc_queue<T, qsize>::try_pop_commit(T& out) {
-    uint64_t modsize = qsize - 1;
+
     //quick loads to avoid unneeded fences in empty case
     auto ctail = tail.load(std::memory_order_relaxed);
     auto dequeue = dequeue_opt.load(std::memory_order_relaxed);
@@ -108,7 +112,7 @@ bool spmc_queue<T, qsize>::try_pop_commit(T& out) {
     
     std::atomic_thread_fence(std::memory_order_acquire);
 
-    //load is acquire since memory fence takes care of that
+    //load is acquire since memory fence
     dequeue = dequeue_opt.fetch_add(1, std::memory_order_relaxed);
 
     //reload tail if need be
@@ -123,16 +127,16 @@ bool spmc_queue<T, qsize>::try_pop_commit(T& out) {
     }
 
     auto chead = head.fetch_add(1, std::memory_order_acq_rel);
-    auto& el = elements[(size_t)(chead & modsize)];
+    auto& el = elements[chead & modsize];
     out = std::move(el);
     el.~T();
     return true;
 }
 
 //try the non overcommit queue - all these for eventual benchmarking
+//I'm 95% sure that this case doesn't have a spurious failure case
 template<class T, size_t qsize>
-bool spmc_queue<T, qsize>::try_pop_dec(T& out) {
-    uint64_t modsize = qsize - 1;
+bool spmc_queue<T, qsize>::try_pop(T& out) {
     //quick loads to avoid unneeded fences in empty case
     auto ctail = tail.load(std::memory_order_relaxed);
     auto dequeue = dequeue_opt.load(std::memory_order_relaxed);
@@ -158,7 +162,7 @@ bool spmc_queue<T, qsize>::try_pop_dec(T& out) {
     }
 
     auto chead = head.fetch_add(1, std::memory_order_acq_rel);
-    auto& el = elements[(size_t)(chead & modsize)];
+    auto& el = elements[chead & modsize];
     out = std::move(el);
     el.~T();
     return true;
@@ -167,8 +171,7 @@ bool spmc_queue<T, qsize>::try_pop_dec(T& out) {
 
 //with little contention, each one is close
 template<class T, size_t qsize>
-bool spmc_queue<T, qsize>::try_pop(T& out) {
-    uint64_t modsize = qsize - 1;
+bool spmc_queue<T, qsize>::try_pop_cas(T& out) {
     //should work most of time, cas will save us anyways
     //if some spooky changes happen to head
     auto ctail = tail.load(std::memory_order_relaxed);

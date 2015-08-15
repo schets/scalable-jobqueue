@@ -1,10 +1,10 @@
 #include <thread>
-#include <spmc.hpp>
+#include "spmc.hpp"
 #include <iostream>
 
 std::atomic<int64_t> check_counter;
 
-const int64_t num_iter = 1e7; //check_counter should equal num_iter after all
+const int64_t num_iter = (int64_t)1e7; //check_counter should equal num_iter after all
 
 constexpr size_t nthread = 1;
 
@@ -45,8 +45,9 @@ int _main() {
     pushthread.join();
     for (auto& th : threads)
         th.join();
+	return 0;
 }
 
-int main() {
+int main(void) {
     for(size_t i = 0; i < 5; i++) _main();
 }
