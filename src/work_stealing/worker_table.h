@@ -7,6 +7,7 @@
 #include "types.hpp"
 #include "../util/rw_lock.h"
 #include "../util/buffer_size.hpp"
+#include "shared_array.hpp"
 //This class is used to perform lookups on which workers
 //are working on a given task
 //lock free hash table, maps a task id to a list
@@ -27,37 +28,9 @@ namespace _private {
 
 class worker_table {
 
-	struct table_elem {
-		std::atomic<int64_t> task_id;
+	struct table_elem;
 
-		//normal pointer because I know it's size
-		std::atomic<id_type> *workers;
-
-		rw_lock listlock;
-
-		table_elem() :
-			task_id(-1),
-			workers(nullptr) {}
-
-		void init(id_type which, size_t wksize) {
-			listlock.init();
-			workers = new std::atomic<id_type>[wksize];
-			workers[0] = which;
-			for (size_t i = 1; i < wksize; i++) {
-				workers[i] = -2;
-			}
-		}
-		//must use a manual destructor...
-		void destroy() {
-			task_id = -1;
-			if (workers) {
-				delete[] workers;
-			}
-			listlock.destroy();
-		}
-	};
-
-	std::shared_ptr<table_elem> cur_tbl;
+	shared_array<table_elem> cur_tbl;
 	buffer_size<64, decltype(cur_tbl)>::buffer b1;
 
 	size_t arrsize;
@@ -72,7 +45,7 @@ class worker_table {
 	//only the actual table move does
 	std::mutex write_setup;
 
-	table_elem &lookup_existing(task_id tsk, table_elem *elems);
+	static table_elem &lookup_existing(task_id tsk, table_elem *elems, size_t arsize);
 
 	void resize();
 public:

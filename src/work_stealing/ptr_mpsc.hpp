@@ -20,23 +20,45 @@ class ptr_mpsc {
 
 	decltype(tail) head;
 
+	buffer_size<64, decltype(tail)>::buffer b2;
+
+	//rarely used, except when tail is made to be nillers
+	decltype(head) link;
+
 public:
 	void push(task<C> *topush);
+	void push_many(task<C> *head, task<C>* tail);
+
 	task<C> *pop();
+
+	template<class Lambda>
+	void apply_to_all(const Lambda& fnc);
 };
 
 
 template<class C>
 void ptr_mpsc<C>::push(task<C> *topush) {
-	topush->next.store(nullptr, std::memory_order_relaxed);
-	auto prev = head.exchange(topush, std::memory_order_acq_rel);
-	prev->next.store(topush, std::memory_order_release);
+	push_many(topush, topush);
+}
+
+template<class C>
+void ptr_mpsc<C>::push_many(task<C> *nhead, task<C> *ntail) {
+	nhead->next.store(nullptr, std::memory_order_relaxed);
+
+	auto lnk = link.load(std::memory_order_relaxed);
+	auto oldhead = head.exchange(nhead, std::memory_order_acq_rel);
+	//can store relaxed, won't be reordered with regards to
+	//the exchange (or a later exchange), and it's ok if it gets reordered with
+	//a later store to nullptr. The pushing thread shall never
+	//access nhead, ntail, and between anyways
+	oldhead->next.store(ntail, std::memory_order_relaxed);
+
 }
 
 template<class C>
 task<C> *ptr_mpsc<C>::pop() {
-	auto ctail = tail.load(std::memory_order_relaxed);
-	auto next = ctail->next.load(std::memory_order_acquire);
+	auto ctail = tail.load(std::memory_order_consume);
+	auto next = ctail->next.load(std::memory_order_relaxed);
 
 	if (next == nullptr) {
 		return nullptr;
@@ -44,6 +66,18 @@ task<C> *ptr_mpsc<C>::pop() {
 
 	tail.store(next, std::memory_order_release);
 	return next;
+}
+
+template<class C>
+template<class Lambda>
+void ptr_mpsc<C>::apply_to_all(const Lambda &fnc) {
+	auto ctail = tail.load(std::memory_order_consume);
+	auto next = ctail->next.load(std::memory_order_consume);
+	while (next) {
+		fnc(ctail);
+		ctail = next;
+		next = ctail->next.load(std::memory_order_consume);
+	}
 }
 
 } // namespace _private

@@ -38,7 +38,7 @@ public:
 	}
 
 	//slower but more accurate space estimate.
-	size_t space_est(bool update_head_c = true) {
+	size_t space_est() {
 		return head.load(std::memory_order_relaxed) -
 			tail.load(std::memory_order_relaxed);
 	}

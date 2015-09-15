@@ -1,49 +1,38 @@
 #pragma once
 //game plan
 /**
-mix of private queue and work stealing method
-each queue pushes all tasks to a privately held deque
-occasionally, worker will check to see if work cann be stolen
-and if so then pass a task from the back of the stack to the worker
+each worker task pushes into private deque
+this may not happen if there are other inactive workers
+then tasks will go directly to them
 
-In addition, every so often, the workers *may*
-put a task into a queue so that
+but, excluding that case,
+it's a plain private deque
+there will be a spmc queue (bounded)
+which some of these tasks will get pushed into
+the worker will push tasks in at the beginning,
+and otherwise, only do so when tasks are stolen
+and the size gets too small
 
-This could also be a single central mpmc queue, since
-pushing chunks will be fairly uncommon.
+this allows a clean and effecient deque implementation
+that avoids any sort of concurrency and will be faster
 
-This step could be skippable as well - all implementations will be tested
+This is good since most work is not stolen
+and exists only in the private deque
 
-When it finally comes time to wait on a task, there are a few possible routes
+When going to steal work, a worker will do 1 of two things - 
 
-1. Just wait on it (bad).
-2. Perform other tasks in the local tree
-3. Perform other tasks in the remote tree
-4. Work on arbitrary tasks. (Maybe save stack frame for easy restarting)
+1. Try to take a task from the input queue. This will increase throughput,
+   at the cost of per-task latency. Then go for most recent task,
+   or steal from some random workers
 
-1 is slow, and better things can be done.
-2 will probably be the first course of action - no synchronization needed
-3 will be next - needs synchronizing but better parallelization, quicker completion for individual tasks, less throughput. hard memorywise
-4 and 1 are tricky. 4 could delay the completion of a task - even if work is being done,
-a tasks could get starved. With 4, one could save the current stack location, start working on another tasks,
-and when one gets the chance to resume work then do so, and resume the original. Upon completion of that,
-restart the other task. this is hard. 1 is easier.
+2. Search for the highest priority tasks (oldest task),
+   and try to steal work from workers processing that
 
-Could possibly try and get some benefits of #3 without
-the tree synchronization, by allowing directed requests.
-Would it even work when a single task is widely split?
-
-How does one effectively mix tree stealing and the chunks?
-Maybe forget chunks for now, don't really seem to be needed
-greatly simplifies some synchronization methods
-
-mayyyyybe don't actually remove anything from back of deque
-not a whole lot of tasks are stolen, and just mark stolen ones
-when one pulls a stolen job, just drop it and continue on
-(don't deallocate, since owned by other thread)
-
-could also try just not stealing from trees.
-allow work requests for specific jobs, have job-specific deques
+   This will make each task finish more quickly, but there will be more
+   tasks stolen and may have a noticable affect on throughput.
+   That will be especially true in benchmarks which flood
+   the queue with worthless tasks, since there will be many
+   stolen tasks that generate very few children (and incur very little non-steal work)
 */
 
 #include <atomic>
@@ -56,14 +45,10 @@ allow work requests for specific jobs, have job-specific deques
 #include "types.hpp"
 
 namespace work_stealing {
-using namespace _private;
-enum class steal_strat {
-	Share,
-	Steal
-};
 
 template<class C>
 class work_stealing {
+	using namespace _private;
 
 	typedef _private::task<C> task;
 	//static helpers

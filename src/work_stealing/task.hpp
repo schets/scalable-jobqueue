@@ -10,15 +10,14 @@ namespace _private {
 template<class C>
 struct task {
 	C fnc;
-	std::atomic<uintptr_t> extra; //for various uses
+	std::atomic<task<C> *> next; //tasks have many ll uses
+	task_id task_id;
 	std::atomic<flag_t> flags;
 	id_type wid;
-	id_type task_id;
-	id_type refc;
 
 	template<class ...Args>
 	task(task *p, id_type wid, Args...&& ctors) : fnc(std::forward<Args>(ctors...)), parent(p) {
-		extra.store(nullptr, std::memory_order_relaxed);
+		next.store(nullptr, std::memory_order_relaxed);
 		flags.store(0, std::memory_order_relaxed);
 	}
 

@@ -52,11 +52,6 @@ static uint32_t hash_task(uint32_t inval) {
 	return inval;
 }
 
-template<class T>
-std::shared_ptr<T> make_shared_array(size_t n_elems) {
-	return std::shared_ptr(new T[n_elems], std::default_delete<T[]>);
-}
-
 //read up the list of entries, overwrite the first nonpositive entry
 static void add_worker_into(std::atomic<id_type> *wks, size_t wksize, id_type worker, rw_lock* lck) {
 
@@ -190,7 +185,7 @@ worker_table::worker_table() {
 worker_table::~worker_table() {
 }
 
-worker_table::table_elem &worker_table::lookup_existing(task_id task, table_elem *elems) {
+worker_table::table_elem &worker_table::lookup_existing(task_id task, table_elem *elems, size_t arsize) {
 
 	//this function is only called for already existing
 	//and still in-progress tasks
@@ -207,25 +202,27 @@ worker_table::table_elem &worker_table::lookup_existing(task_id task, table_elem
 	//table is sparsely populated, so will have low collisions
 	//and linear probing means that when there is one,
 	//the data gets loaded into the cache pronto!
-	auto index = hash_task(task) % arrsize;
+	auto index = hash_task(task) % arsize;
 	for (;;) {
 		auto &cur_struct = elems[index];
 		if (cur_struct.task_id.load(std::memory_order_relaxed) == task) {
 			return cur_struct;
 		}
-		index = (index + 1) % arrsize;
+		index = (index + 1) % arsize;
 	}
 }
 
 void worker_table::add_worker_to(task_id task, id_type worker) {
-	auto ref_tbl = cur_tbl;
-	auto& mytbl = lookup_existing(task, ref_tbl.get());
+	auto ref_tbl = cur_tbl.load(std::memory_order_consume);
+	auto as = ref_tbl.size();
+	auto& mytbl = lookup_existing(task, ref_tbl.get(), as);
 	add_worker_into(mytbl.workers, wksize, worker, &mytbl.listlock);
 }
 
 void worker_table::remove_worker_from(task_id task, id_type worker) {
-	auto ref_tbl = cur_tbl;
-	auto& mytbl = lookup_existing(task, ref_tbl.get());
+	auto ref_tbl = cur_tbl.load();
+	auto as = ref_tbl.size();
+	auto& mytbl = lookup_existing(task, ref_tbl.get(), as);
 	remove_worker(mytbl.workers, wksize, worker, &mytbl.listlock);
 }
 
@@ -236,6 +233,7 @@ void worker_table::remove_worker_from(task_id task, id_type worker) {
 //this exits
 void worker_table::start_task(task_id task, id_type worker) {
 	lock.acquire_read();
+	auto arrsize = cur_tbl.size();
 	//acquire table
 	auto tbl = cur_tbl.get();
 	auto index = hash_task(task) % arrsize;
@@ -284,22 +282,16 @@ void worker_table::start_task(task_id task, id_type worker) {
 //since the task is completed
 //nobody will steal for it, lookup it's workers, etc.
 void worker_table::end_task(task_id task) {
-	lock.acquire_read();
-	auto ref_ptr = cur_tbl; //this lets us move deletes outside of the lock!
-	auto& mytbl = lookup_existing(task, ref_ptr.get());
+	auto ref_ptr = cur_tbl.load();
+	auto& mytbl = lookup_existing(task, ref_ptr.get(), ref_ptr.size());
 	mytbl.task_id.store(empty_task, std::memory_order_relaxed);
-	lock.release_read();
-	auto todel = mytbl.workers;
-	ref_ptr = nullptr; //delete this first, who knows how
-	delete[] todel;
-	//much memory it holds
-	mytbl.listlock.destroy();
+	mytbl.destroy();
 }
 
 //!when this is called, assume that the element exists
 size_t worker_table::find_active_workers(id_type *out, size_t maxn, task_id which) {
 	auto ref_hold = cur_tbl;
-	auto& mytbl = lookup_existing(which, ref_hold.get());
+	auto& mytbl = lookup_existing(which, ref_hold.get(), ref_hold.size());
 	size_t cind = 0;
 	auto tbl = mytbl.workers;
 
@@ -326,15 +318,16 @@ size_t worker_table::find_active_workers(id_type *out, size_t maxn, task_id whic
 
 
 void worker_table::resize() {
-	//already have lock on write setup at this point
-	auto ref_hold = cur_tbl;
-	auto ref = ref_hold.get();
+	//already have lock on write setup at this point - don't needs locking and all that
+	auto new_tbl = cur_tbl.load();
+	auto ref = cur_tbl.get();
+	auto newsize = cur_tbl.size();
 	auto retry = true;
 	do {
-		cur_tbl = make_shared_array<table_elem>(wksize * 2);
+		newsize *= 2;
+		new_tbl = shared_array<table_elem>(newsize);
 		lock.acquire_write();
-		auto tbl = cur_tbl.get();
-		auto newsize = wksize * 2;
+		auto tbl = new_tbl.get();
 		for (size_t i = 0; i < wksize; i++) {
 			auto& elem = ref[i];
 			if (elem.task_id.load(std::memory_order_relaxed) != empty_task) {
@@ -353,10 +346,13 @@ void worker_table::resize() {
 					goto retry_resize;
 			}
 		}
-		retry = false;
+		cur_tbl = new_tbl;
+		lock.release_write();
+		break;
+		//looooooooool fix this i'm too lazy
 	retry_resize:
 		lock.release_write();
-	} while (retry);
+	} while (1);
 }
 
 } // namespace _private
