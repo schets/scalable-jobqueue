@@ -5,6 +5,8 @@
 
 #include "../util/buffer_size.hpp"
 
+namespace work_stealing {
+namespace _private {
 //this is to be used in conjunction with a private stack -
 //the private stack essentially stores the fork stack
 //of each task. It remains unmodifed by all this stealing
@@ -19,15 +21,16 @@ class _ptr_spmc {
 	buffer_size<64, decltype(ptrs)>::buffer b1;
 
 	//data for stealing crapola
-	std::atomic<size_t> head;
-	std::atomic<size_t> tail_cache;
+	std::atomic<intptr_t> head;
+	std::atomic<intptr_t> tail_cache;
 
-	buffer_size<64, std::atomic<size_t>>::buffer b2;
+	buffer_size<64, std::atomic<intptr_t>,
+					std::atomic<intptr_t>>::buffer b2;
 
-	std::atomic<size_t> tail;
-	size_t head_cache;
+	std::atomic<intptr_t> tail;
+	intptr_t head_cache;
 
-	size_t reload_tail_cache(size_t ctail);
+	 reload_tail_cache(size_t ctail);
 
 public:
 
@@ -50,9 +53,13 @@ public:
 	//!returns nullptr on failure
 	void *deque();
 
+	size_t deque_n(void *holder, size_t n = 1);
+
 
 
 	_ptr_spmc();
 	~_ptr_spmc();
 };
 
+} // namespace _private
+} // namespace work_stealing

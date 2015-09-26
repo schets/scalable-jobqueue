@@ -33,6 +33,7 @@ When going to steal work, a worker will do 1 of two things -
    That will be especially true in benchmarks which flood
    the queue with worthless tasks, since there will be many
    stolen tasks that generate very few children (and incur very little non-steal work)
+   It will be interesting to test this on tasks that use less mem
 */
 
 #include <atomic>
@@ -61,10 +62,6 @@ class work_stealing {
 	constexpr static id_type noid = -1;
 
 	/**
-	 message statuses
-	*/
-
-	/**
 	task statuses
 	*/
 	constexpr static flag_t done = 1;
@@ -75,63 +72,6 @@ class work_stealing {
 	constexpr static flag_t dealloc = 1 << 6;
 	constexpr static flag_t open_msg = 1 << 7;
 	constexpr static flag_t distributed = 1 << 8; //not used yet...
-
-	struct message {
-		//assume will never be odd aligned
-		//so stuff status into the first bit
-		std::atomic<task *>& myref;
-		message(std::atomic<task *>& r) : myref(r) {
-			r.store(nullptr, std::memory_order_relaxed);
-		}
-
-		//tries to kill the message,
-		//is up to caller to deal with refcounts
-		bool kill_message() {
-			auto curv = myref.load(std::memory_order_relaxed);
-			//someone has 'activated' the message
-			if (curv) {
-				return;
-			}
-			//set the pointer to 1 - therefore nothing else will touch it
-			//relaxed is valid - there is no synchronization (yet)
-			//since only one thread will actually execute this...
-			myref.compare_exchange_strong(curv,
-										  (task *)1,
-										  std::memory_order_relaxed,
-										  std::memory_order_relaxed);
-		}
-
-		bool set_message(task *tsk) {
-			auto curs = myref.load(std::memory_order_relaxed);
-
-			//someone has already set the pointer
-			if (curs) {
-				return false;
-			}
-
-			//again, no ordering needed here - can only succeed by one actor
-			return myref.compare_exchange_strong(curs,
-												 tsk,
-												 std::memory_order_relaxed,
-												 std::memory_order_relaxed);
-		}
-
-		const task *view_message(std::memory_order ord = std::memory_order_consume) {
-			//I think I could get away with relaxed
-			//since no ordering/syncronization going on here
-			//(only atomicity)
-			//but consume definitely works
-			auto cmess = myref.load(ord) & (~1);
-			if (cmess) {
-				return *cmess;
-			}
-			return nullptr;
-		}
-
-		task *get_message(std::memory_order ord = std::memory_order_consume) {
-			auto cmess
-		}
-	};
 
 	class context {
 		task_context *ctx;
@@ -189,11 +129,12 @@ class work_stealing {
 	};
 
 
-	void request_for_from(id_type from, id_type taskid, std::atomic<task *> &mytask);
-	void request_for(id_type taskid, std::atomic<task *> &mytask);
-	void request_any(std::atomic<task *> &mytask);
+	task *look_for_from(id_type from, id_type taskid);
+	task *look_for(id_type taskid);
+	task *look_any();
 
-	//!wastes time spinning
+	//!wastes time spinning -- should avoid calling
+	//!this and look for useful work
 	void loop_cycles(size_t ncycles);
 
 public:
@@ -213,7 +154,7 @@ void work_stealing<C>::context::fork(Args...&& ctors) {
 	added_tasks++;
 
 	//not required just yet - no tree walking
-	//!add the task to the list of children
+	//add the task to the list of children
 	//tsk->next.store(cur->children, std::memory_order_relaxed);
 	//cur->children.store(tsk, std::memory_order_release);
 
