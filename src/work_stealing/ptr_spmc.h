@@ -30,7 +30,7 @@ class _ptr_spmc {
 	std::atomic<intptr_t> tail;
 	intptr_t head_cache;
 
-	 reload_tail_cache(size_t ctail);
+	 size_t reload_tail_cache(size_t ctail);
 
 public:
 
@@ -41,7 +41,12 @@ public:
 	}
 
 	//slower but more accurate space estimate.
+	template<bool reload_head = false>
 	size_t space_est() {
+		auto chead = head.load(std::memory_order_relaxed);
+		if (reload_head) {
+			head_cache = chead;
+		}
 		return head.load(std::memory_order_relaxed) -
 			tail.load(std::memory_order_relaxed);
 	}

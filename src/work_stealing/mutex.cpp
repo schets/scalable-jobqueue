@@ -149,8 +149,6 @@ bool shared_mutex<fw>::try_exclusive_lock() {
 	return false;
 }
 
-
-
 template<>
 bool shared_mutex<fw>::try_shared_lock() {
 

@@ -22,10 +22,23 @@ enum class writer_priority {
 	favors_readers,
 };
 
-//this mutex won't favor writers -
-//that is, if a writer tries to acquire the mutex
-//with readers, it will simply fail and not prevent more
-//readers from coming through
+/**
+ * This is a shared mutex with two versions -
+ * one is a mutex which favors readers over writers,
+ * and the other favors writers. What does that mean?
+ * 
+ * When a writer tries to acquire the favors_reader mutex and fails,
+ * it simply fails to acquire the mutex. Readers can still acquire
+ * the mutex - theoretically locking out the writer forever. This
+ * version is more effecient, and is much less likely to block readers
+ *
+ * When a writer tries to acquires the favors_writer mutex, it prevents future
+ * readers from acquiring the mutex until a writer gets a turn.
+ * In addition, any writers that try to wait while another writer works
+ * can prevent readers from acquiring after the writer leaves. This
+ * mutex has more room for blocking readers and is slower, so
+ * should only be considered if writers must have high priority
+*/
 template<writer_priority = writer_priority::favors_readers>
 class shared_mutex {
 	//store rw data mixed in a 64 bit thingy!
@@ -38,9 +51,4 @@ public:
 	void shared_unlock();
 };
 
-//This mutex is also a shared_exclusive mutex, except
-//when a writer fails, it will make the mutex as waiting
-//on a writer block incoming readers
-//until that writer is satisfied
-//after that writer, it becomes a free-for-all again
 }
